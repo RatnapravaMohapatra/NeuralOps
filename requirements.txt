@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+pydantic
+
+langchain
+langchain-core
+langchain-community
+langchain-groq
+
+langgraph
+langsmith
+rank-bm25
+
+streamlit
+httpx
+python-dotenv
+pandas
