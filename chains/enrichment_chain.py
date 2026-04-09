@@ -6,20 +6,42 @@ from langchain_core.output_parsers import JsonOutputParser
 
 load_dotenv()
 
-
 def build_enrichment_chain():
+    api_key = os.getenv("GROQ_API_KEY")
+
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
-        api_key=os.environ["GROQ_API_KEY"],
+        api_key=api_key,
         temperature=0,
     )
+
     prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You enrich incident data with additional context. Given an error summary, "
-            "return JSON with keys: affected_components (list), business_impact (string), "
-            "urgency_score (int 1-10).",
-        ),
-        ("human", "Error summary: {summary}\nService: {service_name}\nSeverity: {severity}"),
+        ("system",
+         "Return JSON with keys: affected_components, business_impact, urgency_score (1-10)"),
+        ("human", "Error: {summary}\nService: {service_name}\nSeverity: {severity}")
     ])
-    return prompt | llm | JsonOutputParser()
+
+    parser = JsonOutputParser()
+    chain = prompt | llm | parser
+
+    def run(summary, service_name, severity):
+        try:
+            result = chain.invoke({
+                "summary": summary,
+                "service_name": service_name,
+                "severity": severity
+            })
+        except Exception:
+            return {
+                "affected_components": [],
+                "business_impact": "Unknown",
+                "urgency_score": 5
+            }
+
+        return {
+            "affected_components": result.get("affected_components", []),
+            "business_impact": result.get("business_impact", "Unknown"),
+            "urgency_score": int(result.get("urgency_score", 5))
+        }
+
+    return run
