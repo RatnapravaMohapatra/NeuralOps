@@ -1,44 +1,42 @@
-from rank_bm25 import BM25Okapi
 import logging
+import re
+from rank_bm25 import BM25Okapi
 
 logger = logging.getLogger(__name__)
 
 
-def tokenize(text: str) -> list[str]:
-    return [t.lower() for t in text.split() if len(t) > 2]
+def tokenize(text: str):
+    if not text:
+        return []
+    text = re.sub(r"[^a-z0-9\s]", " ", text.lower())
+    return [t for t in text.split() if len(t) > 2]
 
 
 class VectorlessRAG:
-    def __init__(self, documents: list[dict]):
-        """
-        documents: list of dicts with at least:
-            - 'error_text' (str): the searchable text
-            - any other fields returned as metadata
-        """
+    def __init__(self, documents):
         if not documents:
-            raise ValueError("Cannot initialize RAG with empty document list.")
+            raise ValueError("Empty docs")
 
         self.documents = documents
         corpus = [tokenize(doc["error_text"]) for doc in documents]
         self.bm25 = BM25Okapi(corpus)
-        logger.info("VectorlessRAG initialized with %d documents.", len(documents))
 
-    def retrieve(self, query: str, top_k: int = 3) -> list[dict]:
+    def retrieve(self, query, top_k=3):
         tokens = tokenize(query)
         if not tokens:
-            logger.warning("Empty token list after tokenization. Returning no results.")
             return []
 
         scores = self.bm25.get_scores(tokens)
-        ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:top_k]
+
+        ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
 
         results = []
-        for idx, score in ranked:
-            if score > 0:
-                results.append({
-                    **self.documents[idx],
-                    "bm25_score": round(float(score), 4),
-                })
+        for idx, score in ranked[:top_k]:
+            if score <= 0:
+                continue
+            results.append({
+                **self.documents[idx],
+                "bm25_score": round(float(score), 4)
+            })
 
-        logger.info("BM25 retrieval: query_tokens=%d results=%d", len(tokens), len(results))
         return results
