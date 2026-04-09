@@ -9,6 +9,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 API_BASE = os.getenv("API_BASE_URL") or st.secrets.get("API_BASE_URL")
+if not API_BASE:
+    st.error("❌ API_BASE_URL not set. Please configure secrets.")
+    st.stop()
 
 st.set_page_config(
     page_title="NeuralOps | AI Incident Analysis", 
@@ -339,20 +342,25 @@ if page == "Analyze":
             status_text.empty()
             progress_bar.empty()
             
-            with st.spinner("Calling AI pipeline..."):
+            with st.spinner("Analyzing with AI agents..."):
                 try:
                     resp = httpx.post(
                         f"{API_BASE}/api/analyze",
                         json={"log_input": log_input},
-                        timeout=90.0
+                        timeout=60.0
                     )
                     resp.raise_for_status()
                     result = resp.json()
+                except httpx.TimeoutException:
+                    st.error("⏳ Request timed out. Backend may be slow or sleeping.")
+                    st.stop()
                 except httpx.HTTPStatusError as e:
-                    st.error(f"API Error {e.response.status_code}: {e.response.text[:200]}")
+                    st.error(f"⚠️ API Error {e.response.status_code}")
+                    st.code(e.response.text[:300])
                     st.stop()
                 except Exception as e:
-                    st.error(f"Connection error: {e}")
+                    st.error("🚫 Backend not reachable")
+                    st.caption(str(e))
                     st.stop()
             
             st.balloons()
@@ -364,6 +372,10 @@ if page == "Analyze":
             col2.metric("Severity", result['severity'])
             col3.metric("Service", result['service_name'])
             col4.metric("Evaluation", result['evaluation'])
+            
+            # LOW CONFIDENCE WARNING
+            if result["confidence"] < 0.6:
+                st.warning("⚠️ Low confidence result — manual verification recommended")
             
             st.markdown("### Root Cause Analysis")
             st.info(result['root_cause'])
@@ -412,7 +424,8 @@ elif page == "Dashboard":
         stats = httpx.get(f"{API_BASE}/api/stats", timeout=10.0).json()
         incidents = httpx.get(f"{API_BASE}/api/incidents", timeout=10.0).json()["incidents"]
     except Exception as e:
-        st.error(f"Could not connect to API: {e}")
+        st.error("🚫 Backend not reachable")
+        st.caption(str(e))
         st.stop()
     
     col1, col2, col3 = st.columns(3)
@@ -450,7 +463,8 @@ elif page == "Observability":
     try:
         stats = httpx.get(f"{API_BASE}/api/stats", timeout=10.0).json()
     except Exception as e:
-        st.error(f"Could not connect to API: {e}")
+        st.error("🚫 Backend not reachable")
+        st.caption(str(e))
         st.stop()
     
     col1, col2, col3 = st.columns(3)
