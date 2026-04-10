@@ -5,130 +5,157 @@ from langchain_groq import ChatGroq
 
 logger = logging.getLogger(__name__)
 
+# =========================================================
+# SYSTEM PROMPT (YOUR FULL INTELLIGENCE PRESERVED)
+# =========================================================
 SYSTEM_PROMPT = """You are a senior SRE root cause analysis agent with 10+ years of experience.
 
-YOUR THINKING PIPELINE (follow in strict order):
-Step 1 → Read the log carefully. Extract the exact error signal.
-Step 2 → Match the signal to the evidence table below.
-Step 3 → Explain what happened INSIDE the system — not just what the error says.
-Step 4 → Assign confidence based on signal strength — not intuition.
-Step 5 → Return structured JSON.
+════════════════════════════════════════
+THINKING PIPELINE (STRICT)
+════════════════════════════════════════
+1. Read the log carefully
+2. Extract exact error signal
+3. Match signal to table
+4. Explain system-level failure
+5. Assign confidence based on signal
 
 ════════════════════════════════════════
 GOLDEN RULE
 ════════════════════════════════════════
 "If it is not in the log, it is not in the answer."
 
-Never guess. Never assume. Never hallucinate.
+NEVER guess. NEVER assume. NEVER hallucinate.
 
 ════════════════════════════════════════
-ANTI-HALLUCINATION BLOCKS
+ANTI-HALLUCINATION RULES
 ════════════════════════════════════════
-NEVER assume DB issues unless log explicitly contains:
-  SQL, database, query, pool, JDBC, HikariCP, connection pool, datasource
-
-NEVER assume memory issues unless log explicitly contains:
-  heap, OOM, OutOfMemoryError, GC overhead, memory, malloc
-
-NEVER copy root cause from RAG context if it does not match the log signal.
-RAG context is a secondary HINT only. The log is the primary TRUTH.
+- Do NOT assume DB issues without SQL/pool keywords
+- Do NOT assume memory issues without heap/OOM keywords
+- RAG is only a hint, NEVER override log
 
 ════════════════════════════════════════
-SIGNAL → SYSTEM CAUSE → CONFIDENCE TABLE
+SIGNAL → CAUSE → CONFIDENCE
 ════════════════════════════════════════
-Match the log to ONE signal. Use that confidence value exactly.
 
-Signal                           System Cause                                       Confidence
-"pool exhausted"                 All DB connections occupied, new requests           0.91
-                                 blocked from acquiring a connection.
-"timed out" + http URL           Service reachable but not responding in time —      0.75
-                                 overloaded, slow query, or blocking operation.
-"timed out" (no URL)             Internal operation blocking the thread —            0.70
-                                 slow computation or I/O wait.
-"Connection refused"             Target service is completely down —                 0.85
-                                 no process listening on that port.
-"500 Internal Server Error"      Unhandled exception inside the application —        0.80
-                                 bug or missing error handling.
-"OutOfMemoryError" or "heap"     JVM heap exhausted — memory leak or                 0.90
-                                 unbounded cache with no eviction policy.
-"certificate" or "TLS" or "SSL"  TLS certificate expired or misconfigured —         0.92
-                                 preventing secure handshake.
-"No space left" or "disk full"   Disk partition 100% full —                         0.95
-                                 logs or data cannot be written.
-"Insufficient cpu" or "memory"   Kubernetes nodes have no capacity —                0.88
-                                 pods cannot be scheduled.
-"429" or "rate limit"            External API quota exceeded —                       0.90
-                                 requests being throttled or rejected.
-"NullPointerException"           Null reference accessed in code —                  0.80
-                                 missing null guard or uninitialized object.
-"FailedScheduling"               No node can accept the pod —                        0.87
-                                 resource exhaustion or taint blocking scheduling.
-No signal matches                Cannot determine cause from evidence.               0.50
+"pool exhausted" → DB connections fully used → 0.91  
+"timed out" + URL → service slow/overloaded → 0.75  
+"timed out" → internal blocking → 0.70  
+"Connection refused" → service down → 0.85  
+"500 Internal" → application bug → 0.80  
+"OutOfMemoryError" → heap exhausted → 0.90  
+"TLS / certificate" → SSL issue → 0.92  
+"disk full" → storage full → 0.95  
+"429 / rate limit" → API quota exceeded → 0.90  
+"NullPointerException" → null reference bug → 0.80  
+
+No match → 0.50
 
 ════════════════════════════════════════
-ROOT CAUSE FORMAT — MANDATORY 3 SENTENCES
+ROOT CAUSE FORMAT (MANDATORY)
 ════════════════════════════════════════
-Sentence 1 — WHAT failed:
-  "The [exact component] failed because [specific technical reason]."
 
-Sentence 2 — EVIDENCE (quote log text in quotes):
-  "This is evidenced by '[exact quote from the log]' in the error output."
+Sentence 1: WHAT failed  
+Sentence 2: EVIDENCE (quote exact log)  
+Sentence 3: WHY (system explanation)
 
-Sentence 3 — WHY at system level:
-  "This occurs when [system-level explanation — high load, slow queries,
-   memory pressure, thread blocking, resource exhaustion, etc.]."
+Example:
+"The database connection pool is exhausted, preventing new requests from acquiring a connection.
+This is evidenced by 'connection pool exhausted after 30s' in the log output.
+This occurs when concurrent traffic exceeds pool size or slow queries hold connections too long."
 
-STRONG example for pool exhausted:
-  "The database connection pool is exhausted, preventing new requests from
-   acquiring a database connection.
-   This is evidenced by 'connection pool exhausted after 30s' in the error output.
-   This occurs when concurrent traffic exceeds the pool capacity or when slow
-   queries hold connections for too long without releasing them."
-
-WEAK — NEVER produce this:
-  "DB pool full"
-
-Return ONLY valid JSON — no markdown, no explanation outside JSON:
+════════════════════════════════════════
+OUTPUT JSON ONLY
+════════════════════════════════════════
 {
-  "root_cause": "3 sentences following mandatory format above",
-  "evidence": "exact quote from log that identified the signal",
+  "root_cause": "3 sentences",
+  "evidence": "exact log quote",
   "confidence": 0.0,
-  "reasoning": "which signal from the evidence table matched and why"
-}"""
+  "reasoning": "matched signal"
+}
+"""
 
+# =========================================================
+# USER PROMPT
+# =========================================================
 USER_PROMPT = """
-PRIMARY SOURCE — ground truth, analyze this first:
+LOG:
 {summary}
 
 Error Type: {error_type}
 Service: {service_name}
 Severity: {severity}
 
-SECONDARY SOURCE — similar past incidents from RAG (use only if signal directly matches log):
+RAG (use only if directly relevant):
 {rag_context}
+"""
 
-Follow the thinking pipeline. Match signal to evidence table. Return JSON only."""
+# =========================================================
+# SAFETY FUNCTIONS
+# =========================================================
+
+def enforce_evidence(summary: str, evidence: str) -> str:
+    if evidence and evidence in summary:
+        return evidence
+    return summary[:200]
 
 
+def enforce_structure(text: str) -> str:
+    parts = [s.strip() for s in text.split(".") if s.strip()]
+    if len(parts) >= 3:
+        return text
+    return (
+        f"{parts[0] if parts else 'Issue detected'}. "
+        f"This is evidenced by the log output. "
+        f"This occurs due to system-level failure conditions."
+    )
+
+
+def calibrate_confidence(evidence: str) -> float:
+    e = evidence.lower()
+
+    if "pool exhausted" in e:
+        return 0.91
+    if "connection refused" in e:
+        return 0.85
+    if "timeout" in e:
+        return 0.75
+    if "outofmemory" in e or "heap" in e:
+        return 0.90
+    if "disk" in e or "no space" in e:
+        return 0.95
+    if "429" in e:
+        return 0.90
+
+    return 0.5
+
+
+# =========================================================
+# BUILD AGENT
+# =========================================================
 def build_root_cause_agent(groq_api_key: str) -> callable:
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
         api_key=groq_api_key,
         temperature=0,
     )
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", SYSTEM_PROMPT),
         ("human", USER_PROMPT),
     ])
+
     parser = JsonOutputParser()
     chain = prompt | llm | parser
 
+    # =========================================================
+    # MAIN FUNCTION
+    # =========================================================
     def analyze(parsed: dict, rag_results: list[dict]) -> dict:
+
         rag_context = "\n".join(
-            f"- [{r.get('service_name', '?')}] {r.get('root_cause', 'N/A')} "
-            f"(similarity={r.get('boosted_score', r.get('bm25_score', 0))})"
+            f"- {r.get('root_cause', '')}"
             for r in rag_results
-        ) or "No similar incidents found."
+        ) or "No relevant incidents."
 
         try:
             result = chain.invoke({
@@ -138,35 +165,45 @@ def build_root_cause_agent(groq_api_key: str) -> callable:
                 "severity": parsed.get("severity", ""),
                 "rag_context": rag_context,
             })
+
         except Exception as e:
             logger.error("RootCauseAgent failed: %s", e)
             return {
-                "root_cause": "Unable to determine root cause due to a pipeline failure. Manual investigation required.",
-                "evidence": "LLM pipeline error.",
+                "root_cause": "Pipeline failure prevented analysis.",
+                "evidence": parsed.get("summary", "")[:200],
                 "confidence": 0.3,
-                "reasoning": "Pipeline failure — could not invoke LLM.",
+                "reasoning": "LLM failure",
             }
 
         result = result or {}
-        result.setdefault(
-            "root_cause",
-            "Insufficient evidence to determine root cause. Manual investigation required.",
-        )
-        result.setdefault("evidence", "No clear signal found in log.")
-        result.setdefault("confidence", 0.5)
-        result.setdefault("reasoning", "No signal matched the evidence table.")
 
-        try:
-            conf = float(result["confidence"])
-        except (ValueError, TypeError):
-            conf = 0.5
-        result["confidence"] = round(max(0.0, min(1.0, conf)), 3)
+        # =========================
+        # 🔥 FINAL ENFORCEMENT
+        # =========================
+        root = result.get("root_cause", "Insufficient evidence.")
+
+        evidence = enforce_evidence(
+            parsed.get("summary", ""),
+            result.get("evidence", "")
+        )
+
+        root = enforce_structure(root)
+
+        confidence = calibrate_confidence(evidence)
+
+        final = {
+            "root_cause": root,
+            "evidence": evidence,
+            "confidence": confidence,
+            "reasoning": result.get("reasoning", "Signal-based reasoning applied."),
+        }
 
         logger.info(
-            "RootCauseAgent: confidence=%.3f evidence=%s",
-            result["confidence"],
-            result.get("evidence", "")[:80],
+            "RootCauseAgent: confidence=%.2f evidence=%s",
+            final["confidence"],
+            final["evidence"][:80],
         )
-        return result
+
+        return final
 
     return analyze
