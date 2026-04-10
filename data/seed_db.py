@@ -1,6 +1,7 @@
 import sqlite3
 import uuid
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -8,10 +9,14 @@ DB_PATH = "incidents.db"
 
 
 # =========================================================
-# CONNECTION
+# CONNECTION (FIXED)
 # =========================================================
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=10,                 # ✅ wait if locked
+        check_same_thread=False     # ✅ allow multi-thread (FastAPI)
+    )
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -22,6 +27,9 @@ def get_connection():
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
+
+    # ✅ WAL mode (CRITICAL FIX)
+    conn.execute("PRAGMA journal_mode=WAL;")
 
     # incidents table
     cursor.execute("""
@@ -47,7 +55,7 @@ def init_db():
     )
     """)
 
-    # ✅ INSERT SAMPLE DATA IF EMPTY (MAIN FIX)
+    # insert sample data if empty
     count = cursor.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
 
     if count == 0:
@@ -64,8 +72,23 @@ def init_db():
 
     conn.commit()
     conn.close()
-
     logger.info("Database initialized")
+
+
+# =========================================================
+# SAFE COMMIT (RETRY LOGIC)
+# =========================================================
+def safe_commit(conn):
+    for _ in range(3):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e):
+                time.sleep(0.5)
+            else:
+                raise
+    raise RuntimeError("Database commit failed after retries")
 
 
 # =========================================================
@@ -87,7 +110,7 @@ def save_incident(data: dict):
         data.get("confidence"),
     ))
 
-    conn.commit()
+    safe_commit(conn)   # ✅ FIXED
     conn.close()
 
 
@@ -113,19 +136,16 @@ def get_stats():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # total incidents
     total = cursor.execute(
         "SELECT COUNT(*) FROM incidents"
     ).fetchone()[0]
 
-    # severity distribution
     severity_counts = cursor.execute("""
         SELECT severity, COUNT(*) as count
         FROM incidents
         GROUP BY severity
     """).fetchall()
 
-    # average confidence
     avg_conf = cursor.execute("""
         SELECT AVG(confidence) FROM incidents
     """).fetchone()[0]
@@ -138,7 +158,7 @@ def get_stats():
             row[0]: row[1] for row in severity_counts
         },
         "avg_confidence": float(avg_conf) if avg_conf else 0.0,
-        "avg_latency": 0.0  # placeholder (since not stored yet)
+        "avg_latency": 0.0
     }
 
 
@@ -159,7 +179,7 @@ def save_feedback(incident_id: str, rating: int, comment: str):
         comment
     ))
 
-    conn.commit()
+    safe_commit(conn)   # ✅ FIXED
     conn.close()
 
     return {
