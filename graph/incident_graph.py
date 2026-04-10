@@ -21,8 +21,6 @@ log_analyzer = build_log_analyzer(GROQ_API_KEY)
 root_cause_agent = build_root_cause_agent(GROQ_API_KEY)
 fix_agent = build_fix_agent(GROQ_API_KEY)
 
-CONFIDENCE_THRESHOLD = 0.65
-
 
 # --------------------------------------------------------------------------- #
 # State
@@ -47,44 +45,40 @@ class IncidentState(TypedDict):
 def node_parse_logs(state: IncidentState) -> dict:
     log = sanitize_log(state["raw_input"])
     parsed = log_analyzer(log)
-    logger.info("node_parse_logs: error_type=%s service=%s",
-                parsed.get("error_type"), parsed.get("service_name"))
+    logger.info("node_parse_logs: %s", parsed)
     return {"parsed_data": parsed}
 
 
 def node_retrieve(state: IncidentState) -> dict:
-    # Use raw_input only — avoid double-biasing with LLM-generated summary
-    query = state["raw_input"]
+    query = state["raw_input"] + " " + state["parsed_data"].get("summary", "")
     results = retrieve_similar(query, top_k=3)
-    logger.info("node_retrieve: %d similar incidents found", len(results))
+    logger.info("node_retrieve: %d results", len(results))
     return {"rag_results": results}
 
 
 def node_analyze(state: IncidentState) -> dict:
     result = root_cause_agent(state["parsed_data"], state["rag_results"])
     conf = result.get("confidence", 0.5)
-    logger.info("node_analyze: confidence=%.3f evidence=%s",
-                conf, result.get("evidence", "")[:60])
+    logger.info("node_analyze: confidence=%.3f", conf)
     return {"root_cause_data": result, "confidence": conf}
 
 
 def node_generate_fix(state: IncidentState) -> dict:
     fix = fix_agent(state["root_cause_data"], state["parsed_data"])
-    logger.info("node_generate_fix: done for service=%s",
-                state["parsed_data"].get("service_name"))
+    logger.info("node_generate_fix: done")
     return {"fix_data": fix}
 
 
 def node_retry(state: IncidentState) -> dict:
     count = state.get("retry_count", 0) + 1
-    logger.warning("node_retry: attempt %d — re-running root cause analysis", count)
+    logger.warning("node_retry: attempt %d", count)
     result = root_cause_agent(state["parsed_data"], state["rag_results"])
     conf = result.get("confidence", 0.5)
     return {"root_cause_data": result, "confidence": conf, "retry_count": count}
 
 
 def node_escalate(state: IncidentState) -> dict:
-    logger.warning("node_escalate: confidence below threshold after retries — escalating to human review")
+    logger.warning("node_escalate: confidence too low after retries — escalating.")
     return {"escalated": True}
 
 
@@ -95,7 +89,7 @@ def node_escalate(state: IncidentState) -> dict:
 def route_after_analyze(state: IncidentState) -> str:
     conf = state.get("confidence", 0.0)
     retries = state.get("retry_count", 0)
-    if conf >= CONFIDENCE_THRESHOLD:
+    if conf >= 0.8:
         return "generate_fix"
     elif retries < 2:
         return "retry"
@@ -106,7 +100,7 @@ def route_after_analyze(state: IncidentState) -> str:
 def route_after_retry(state: IncidentState) -> str:
     conf = state.get("confidence", 0.0)
     retries = state.get("retry_count", 0)
-    if conf >= CONFIDENCE_THRESHOLD:
+    if conf >= 0.8:
         return "generate_fix"
     elif retries < 2:
         return "retry"
@@ -176,9 +170,7 @@ async def run_incident_pipeline(log_input: str) -> dict:
     fix = final_state.get("fix_data", {})
     conf = final_state.get("confidence", 0.0)
     escalated = final_state.get("escalated", False)
-    rag_results = final_state.get("rag_results", [])
 
-    # Build structured fix output
     fix_parts = []
     if fix.get("immediate_fix"):
         fix_parts.append(f"Immediate: {fix['immediate_fix']}")
@@ -192,27 +184,14 @@ async def run_incident_pipeline(log_input: str) -> dict:
         if escalated else "No fix generated."
     )
 
-    # Build similar incidents summary for UI display
-    similar_incidents = [
-        {
-            "service": r.get("service_name", "unknown"),
-            "root_cause": r.get("root_cause", ""),
-            "score": r.get("boosted_score", r.get("bm25_score", 0)),
-        }
-        for r in rag_results
-    ]
-
     result = {
         "incident_id": incident_id,
         "root_cause": root.get("root_cause", "Could not determine root cause."),
-        "evidence": root.get("evidence", ""),
         "fix_suggestion": fix_suggestion,
-        "fix_summary": fix.get("fix_summary", ""),
         "confidence": conf,
         "severity": parsed.get("severity", "Unknown"),
         "service_name": parsed.get("service_name", "unknown"),
         "evaluation": evaluate_confidence(conf),
-        "similar_incidents": similar_incidents,
         "latency": 0.0,
         "raw_input": log_input,
     }
