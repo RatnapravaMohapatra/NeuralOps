@@ -144,8 +144,8 @@ def build_root_cause_agent(groq_api_key: str) -> callable:
         ("human", USER_PROMPT),
     ])
 
-    parser = JsonOutputParser()
-    chain = prompt | llm | parser
+    
+    chain = prompt | llm
 
     # =========================================================
     # MAIN FUNCTION
