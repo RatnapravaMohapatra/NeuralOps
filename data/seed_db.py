@@ -113,19 +113,32 @@ def get_stats():
     conn = get_connection()
     cursor = conn.cursor()
 
-    total = cursor.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
+    # total incidents
+    total = cursor.execute(
+        "SELECT COUNT(*) FROM incidents"
+    ).fetchone()[0]
 
+    # severity distribution
     severity_counts = cursor.execute("""
         SELECT severity, COUNT(*) as count
         FROM incidents
         GROUP BY severity
     """).fetchall()
 
+    # average confidence
+    avg_conf = cursor.execute("""
+        SELECT AVG(confidence) FROM incidents
+    """).fetchone()[0]
+
     conn.close()
 
     return {
         "total_incidents": total,
-        "severity_distribution": {row[0]: row[1] for row in severity_counts}
+        "severity_distribution": {
+            row[0]: row[1] for row in severity_counts
+        },
+        "avg_confidence": float(avg_conf) if avg_conf else 0.0,
+        "avg_latency": 0.0  # placeholder (since not stored yet)
     }
 
 
