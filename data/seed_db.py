@@ -49,7 +49,62 @@ def init_db():
 
     conn.commit()
     conn.close()
-    logger.info("Database initialized")
+
+    # 🔥 IMPORTANT: seed data after DB init
+    seed_sample_data()
+
+    logger.info("Database initialized with seed data")
+
+
+# =========================================================
+# 🔥 SEED SAMPLE DATA (FIX FOR YOUR ERROR)
+# =========================================================
+def seed_sample_data():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # check if already data exists
+    count = cursor.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
+    if count > 0:
+        conn.close()
+        return
+
+    sample_data = [
+        (
+            "INC-001",
+            "predict-service",
+            "High",
+            "Service is down due to connection refusal.",
+            "Restart service and verify port binding.",
+            0.85
+        ),
+        (
+            "INC-002",
+            "order-service",
+            "Critical",
+            "Database connection pool exhausted under load.",
+            "Increase DB pool size and optimize queries.",
+            0.91
+        ),
+        (
+            "INC-003",
+            "recommendation-service",
+            "High",
+            "Out of memory error due to heap exhaustion.",
+            "Increase heap size and fix memory leaks.",
+            0.90
+        )
+    ]
+
+    cursor.executemany("""
+    INSERT INTO incidents (id, service_name, severity, root_cause, fix_suggestion, confidence)
+    VALUES (?, ?, ?, ?, ?, ?)
+    """, sample_data)
+
+    conn.commit()
+    conn.close()
+
+    logger.info("Sample data seeded")
 
 
 # =========================================================
@@ -114,7 +169,7 @@ def get_stats():
 
 
 # =========================================================
-# SAVE FEEDBACK (FIX FOR YOUR ERROR)
+# SAVE FEEDBACK
 # =========================================================
 def save_feedback(incident_id: str, rating: int, comment: str):
     conn = get_connection()
@@ -141,12 +196,9 @@ def save_feedback(incident_id: str, rating: int, comment: str):
 
 
 # =========================================================
-# OPTIONAL: RAG SUPPORT (VERY IMPORTANT FOR YOU)
+# RAG SUPPORT
 # =========================================================
 def get_all_error_texts():
-    """
-    Used by RAG retriever
-    """
     conn = get_connection()
     cursor = conn.cursor()
 
