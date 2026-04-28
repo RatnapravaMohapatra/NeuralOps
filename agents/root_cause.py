@@ -1,99 +1,81 @@
+import os
 import logging
+from typing import Dict, Any, List
+
+from dotenv import load_dotenv
+from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_groq import ChatGroq
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
-CONF_MIN = 0.15
-CONF_MAX = 0.95
-CONF_DEFAULT = 0.5
 
-SYSTEM_PROMPT = """You are an AI system that finds root cause from logs.
+def build_root_cause_agent(api_key: str):
+    llm = ChatGroq(
+        model="llama-3.3-70b-versatile",
+        api_key=api_key,
+        temperature=0.2,
+    )
+
+    SYSTEM_PROMPT = """
+You are a senior Site Reliability Engineer.
+
+Identify the MOST LIKELY root cause.
+
+RULES:
+- NEVER return "Unknown cause"
+- If uncertain → give best hypothesis
+- Use common failure patterns:
+  timeout, memory, connection pool, config, network
 
 Return JSON:
 {
   "root_cause": "...",
-  "evidence": "...",
-  "confidence": 0.0,
+  "confidence": 0.0-1.0,
   "reasoning": "..."
 }
 
-Rules:
-- confidence must be between 0.15 and 0.95
-- never return null
+Confidence:
+- 0.8+ → clear
+- 0.6–0.8 → likely
+- 0.3–0.6 → uncertain guess
 """
 
-RETRY_PROMPT = """Retry analysis carefully.
-Previous confidence was low.
-Find even weak signals.
-"""
-
-USER_PROMPT = """
-Log: {summary}
-Error: {error_type}
-Service: {service_name}
-Severity: {severity}
-Context: {rag_context}
-"""
-
-
-def build_root_cause_agent(api_key: str):
-    llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=api_key, temperature=0)
-
-    normal_chain = ChatPromptTemplate.from_messages([
+    prompt = ChatPromptTemplate.from_messages([
         ("system", SYSTEM_PROMPT),
-        ("human", USER_PROMPT)
-    ]) | llm | JsonOutputParser()
+        ("human", """
+Parsed Log:
+{parsed}
 
-    retry_chain = ChatPromptTemplate.from_messages([
-        ("system", RETRY_PROMPT),
-        ("human", USER_PROMPT)
-    ]) | llm | JsonOutputParser()
+Similar Incidents:
+{rag}
+""")
+    ])
 
-    def analyze(parsed, rag, retry_count=0, prev_confidence=0.0):
-        summary = parsed.get("summary", "")[:500]
+    chain = prompt | llm | JsonOutputParser()
 
-        rag_text = "\n".join([
-            r.get("root_cause", "") for r in rag
-        ]) or "No context"
-
-        chain = retry_chain if retry_count > 0 else normal_chain
-
+    def run(parsed: Dict, rag: List, retry_count=0, prev_confidence=0.0):
         try:
             result = chain.invoke({
-                "summary": summary,
-                "error_type": parsed.get("error_type"),
-                "service_name": parsed.get("service_name"),
-                "severity": parsed.get("severity"),
-                "rag_context": rag_text
+                "parsed": parsed,
+                "rag": rag or "No similar incidents"
             })
+
+            if not result.get("root_cause"):
+                result["root_cause"] = "Likely system issue due to insufficient data"
+
+            if result.get("confidence", 0) < 0.3:
+                result["confidence"] = 0.3
+
+            return result
+
         except Exception as e:
-            logger.error("RootCause failed: %s", e)
+            logger.error("Root cause failed: %s", e)
             return {
-                "root_cause": "Unknown cause",
-                "evidence": "LLM failure",
-                "confidence": CONF_MIN,
+                "root_cause": "Likely system issue due to insufficient data",
+                "confidence": 0.3,
                 "reasoning": "fallback"
             }
 
-        if not isinstance(result, dict):
-            result = {}
-
-        result["root_cause"] = result.get("root_cause") or "Unknown cause"
-        result["evidence"] = result.get("evidence") or "No evidence"
-        result["reasoning"] = result.get("reasoning") or "No reasoning"
-
-        try:
-            conf = float(result.get("confidence", CONF_DEFAULT))
-            if conf > 1:
-                conf /= 100
-        except:
-            conf = CONF_DEFAULT
-
-        conf = max(CONF_MIN, min(CONF_MAX, conf))
-        result["confidence"] = round(conf, 3)
-
-        return result
-
-    return analyze
+    return run
