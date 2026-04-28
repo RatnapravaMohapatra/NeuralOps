@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from typing import TypedDict, Any
 
@@ -15,17 +16,20 @@ from data.seed_db import save_incident
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
+CONF_THRESHOLD = 0.65
+CONF_MIN = 0.15
+MAX_RETRIES = 2
+MIN_INPUT_LENGTH = 10
+
+# ── Agents ─────────────────────────────
 log_analyzer = build_log_analyzer(GROQ_API_KEY)
 root_cause_agent = build_root_cause_agent(GROQ_API_KEY)
 fix_agent = build_fix_agent(GROQ_API_KEY)
 
 
-# --------------------------------------------------------------------------- #
-# State
-# --------------------------------------------------------------------------- #
-
+# ── State ─────────────────────────────
 class IncidentState(TypedDict):
     raw_input: str
     parsed_data: dict
@@ -38,81 +42,99 @@ class IncidentState(TypedDict):
     escalated: bool
 
 
-# --------------------------------------------------------------------------- #
-# Nodes
-# --------------------------------------------------------------------------- #
-
-def node_parse_logs(state: IncidentState) -> dict:
-    log = sanitize_log(state["raw_input"])
-    parsed = log_analyzer(log)
-    logger.info("node_parse_logs: %s", parsed)
+# ── Nodes ─────────────────────────────
+def node_parse_logs(state: IncidentState):
+    try:
+        log = sanitize_log(state["raw_input"])
+        parsed = log_analyzer(log)
+    except Exception as e:
+        logger.error("parse_logs failed: %s", e)
+        parsed = {
+            "error_type": "UnknownError",
+            "service_name": "unknown",
+            "severity": "Medium",
+            "summary": state["raw_input"][:200],
+        }
     return {"parsed_data": parsed}
 
 
-def node_retrieve(state: IncidentState) -> dict:
-    query = state["raw_input"] + " " + state["parsed_data"].get("summary", "")
-    results = retrieve_similar(query, top_k=3)
-    logger.info("node_retrieve: %d results", len(results))
+def node_retrieve(state: IncidentState):
+    try:
+        retry = state.get("retry_count", 0)
+        top_k = 5 if retry > 0 else 3
+
+        query = state["raw_input"] + " " + state["parsed_data"].get("summary", "")
+        results = retrieve_similar(query, top_k=top_k)
+    except Exception as e:
+        logger.error("retrieve failed: %s", e)
+        results = []
+
     return {"rag_results": results}
 
 
-def node_analyze(state: IncidentState) -> dict:
-    result = root_cause_agent(state["parsed_data"], state["rag_results"])
-    conf = result.get("confidence", 0.5)
-    logger.info("node_analyze: confidence=%.3f", conf)
+def node_analyze(state: IncidentState):
+    try:
+        retry = state.get("retry_count", 0)
+
+        result = root_cause_agent(
+            state["parsed_data"],
+            state["rag_results"],
+            retry_count=retry,
+            prev_confidence=state.get("confidence", 0.0),
+        )
+
+    except Exception as e:
+        logger.error("analyze failed: %s", e)
+        result = {
+            "root_cause": "Unknown cause",
+            "confidence": CONF_MIN,
+            "reasoning": "fallback",
+        }
+
+    conf = result.get("confidence", CONF_MIN)
+    conf = max(CONF_MIN, min(conf, 0.95))
+
     return {"root_cause_data": result, "confidence": conf}
 
 
-def node_generate_fix(state: IncidentState) -> dict:
-    fix = fix_agent(state["root_cause_data"], state["parsed_data"])
-    logger.info("node_generate_fix: done")
+def node_generate_fix(state: IncidentState):
+    try:
+        fix = fix_agent(state["root_cause_data"], state["parsed_data"])
+    except Exception as e:
+        logger.error("fix failed: %s", e)
+        fix = {
+            "immediate_fix": "Restart service",
+            "short_term_fix": "Check logs",
+            "long_term_fix": "Improve monitoring",
+            "fix_summary": "Fallback fix",
+        }
+
     return {"fix_data": fix}
 
 
-def node_retry(state: IncidentState) -> dict:
-    count = state.get("retry_count", 0) + 1
-    logger.warning("node_retry: attempt %d", count)
-    result = root_cause_agent(state["parsed_data"], state["rag_results"])
-    conf = result.get("confidence", 0.5)
-    return {"root_cause_data": result, "confidence": conf, "retry_count": count}
+def node_retry(state: IncidentState):
+    return {"retry_count": state.get("retry_count", 0) + 1}
 
 
-def node_escalate(state: IncidentState) -> dict:
-    logger.warning("node_escalate: confidence too low after retries — escalating.")
+def node_escalate(state: IncidentState):
     return {"escalated": True}
 
 
-# --------------------------------------------------------------------------- #
-# Routing
-# --------------------------------------------------------------------------- #
-
-def route_after_analyze(state: IncidentState) -> str:
+# ── Routing ─────────────────────────────
+def route(state: IncidentState):
     conf = state.get("confidence", 0.0)
     retries = state.get("retry_count", 0)
-    if conf >= 0.8:
+
+    if conf >= CONF_THRESHOLD:
         return "generate_fix"
-    elif retries < 2:
+    elif retries < MAX_RETRIES:
         return "retry"
     else:
         return "escalate"
 
 
-def route_after_retry(state: IncidentState) -> str:
-    conf = state.get("confidence", 0.0)
-    retries = state.get("retry_count", 0)
-    if conf >= 0.8:
-        return "generate_fix"
-    elif retries < 2:
-        return "retry"
-    else:
-        return "escalate"
-
-
-# --------------------------------------------------------------------------- #
-# Graph assembly
-# --------------------------------------------------------------------------- #
-
-def build_graph() -> Any:
+# ── Graph ─────────────────────────────
+def build_graph():
     graph = StateGraph(IncidentState)
 
     graph.add_node("parse_logs", node_parse_logs)
@@ -123,18 +145,17 @@ def build_graph() -> Any:
     graph.add_node("escalate", node_escalate)
 
     graph.set_entry_point("parse_logs")
+
     graph.add_edge("parse_logs", "retrieve")
     graph.add_edge("retrieve", "analyze")
-    graph.add_conditional_edges("analyze", route_after_analyze, {
+
+    graph.add_conditional_edges("analyze", route, {
         "generate_fix": "generate_fix",
         "retry": "retry",
         "escalate": "escalate",
     })
-    graph.add_conditional_edges("retry", route_after_retry, {
-        "generate_fix": "generate_fix",
-        "retry": "retry",
-        "escalate": "escalate",
-    })
+
+    graph.add_edge("retry", "analyze")
     graph.add_edge("generate_fix", END)
     graph.add_edge("escalate", END)
 
@@ -144,14 +165,16 @@ def build_graph() -> Any:
 _graph = build_graph()
 
 
-# --------------------------------------------------------------------------- #
-# Public entrypoint
-# --------------------------------------------------------------------------- #
+# ── Main Entry ─────────────────────────────
+def run_incident_pipeline(log_input: str) -> dict:
+    start = time.time()
 
-async def run_incident_pipeline(log_input: str) -> dict:
+    if not log_input or len(log_input.strip()) < MIN_INPUT_LENGTH:
+        raise ValueError("Invalid log input")
+
     incident_id = generate_incident_id(log_input)
 
-    initial_state: IncidentState = {
+    state: IncidentState = {
         "raw_input": log_input,
         "parsed_data": {},
         "rag_results": [],
@@ -163,36 +186,32 @@ async def run_incident_pipeline(log_input: str) -> dict:
         "escalated": False,
     }
 
-    final_state = _graph.invoke(initial_state)
+    try:
+        final_state = _graph.invoke(state)
+    except Exception as e:
+        logger.error("Pipeline failed: %s", e)
+        return {
+            "incident_id": incident_id,
+            "root_cause": "Pipeline failure",
+            "confidence": CONF_MIN,
+            "latency": round(time.time() - start, 3),
+        }
 
-    parsed = final_state.get("parsed_data", {})
+    latency = round(time.time() - start, 3)
+
     root = final_state.get("root_cause_data", {})
     fix = final_state.get("fix_data", {})
-    conf = final_state.get("confidence", 0.0)
-    escalated = final_state.get("escalated", False)
-
-    fix_parts = []
-    if fix.get("immediate_fix"):
-        fix_parts.append(f"Immediate: {fix['immediate_fix']}")
-    if fix.get("short_term_fix"):
-        fix_parts.append(f"Short-term: {fix['short_term_fix']}")
-    if fix.get("long_term_fix"):
-        fix_parts.append(f"Long-term: {fix['long_term_fix']}")
-
-    fix_suggestion = "\n".join(fix_parts) if fix_parts else (
-        "Confidence too low for automated fix. Escalated for manual review."
-        if escalated else "No fix generated."
-    )
+    conf = final_state.get("confidence", CONF_MIN)
 
     result = {
         "incident_id": incident_id,
-        "root_cause": root.get("root_cause", "Could not determine root cause."),
-        "fix_suggestion": fix_suggestion,
-        "confidence": conf,
-        "severity": parsed.get("severity", "Unknown"),
-        "service_name": parsed.get("service_name", "unknown"),
+        "root_cause": root.get("root_cause", ""),
+        "fix_suggestion": fix.get("fix_summary", ""),
+        "confidence": round(conf, 3),
+        "severity": final_state.get("parsed_data", {}).get("severity", "Unknown"),
+        "service_name": final_state.get("parsed_data", {}).get("service_name", "unknown"),
         "evaluation": evaluate_confidence(conf),
-        "latency": 0.0,
+        "latency": latency,
         "raw_input": log_input,
     }
 
