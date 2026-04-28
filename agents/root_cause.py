@@ -5,103 +5,94 @@ from langchain_groq import ChatGroq
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are a senior SRE root cause analysis agent.
+CONF_MIN = 0.15
+CONF_MAX = 0.95
+CONF_DEFAULT = 0.5
 
-STRICT RULES:
-1. Use ONLY explicit evidence from the log.
-2. Follow the evidence table strictly.
-3. DO NOT guess beyond given signals.
+SYSTEM_PROMPT = """You are an AI system that finds root cause from logs.
 
-EVIDENCE TABLE:
+Return JSON:
+{
+  "root_cause": "...",
+  "evidence": "...",
+  "confidence": 0.0,
+  "reasoning": "..."
+}
 
-"timed out" + URL → Service slow/overloaded → 0.75
-"timed out" no URL → Internal processing slow → 0.70
-"ConnectionRefused" → Service down → 0.85
-"500 Internal" → Application bug → 0.80
-"OOM" → Memory issue → 0.90
-"pool exhausted" → DB pool full → 0.90
-"certificate" → SSL issue → 0.92
-"no space left" → Disk full → 0.95
-"Insufficient cpu" → K8s resource issue → 0.88
-"429" → Rate limit → 0.90
-"NullPointerException" → Code bug → 0.80
+Rules:
+- confidence must be between 0.15 and 0.95
+- never return null
+"""
 
-Return ONLY JSON:
-- root_cause
-- confidence
-- reasoning
+RETRY_PROMPT = """Retry analysis carefully.
+Previous confidence was low.
+Find even weak signals.
 """
 
 USER_PROMPT = """
-Log:
-{summary}
-
-Error Type: {error_type}
+Log: {summary}
+Error: {error_type}
 Service: {service_name}
 Severity: {severity}
-
-Context:
-{rag_context}
+Context: {rag_context}
 """
 
 
-def build_root_cause_agent(groq_api_key: str) -> callable:
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        api_key=groq_api_key,
-        temperature=0,
-    )
+def build_root_cause_agent(api_key: str):
+    llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=api_key, temperature=0)
 
-    prompt = ChatPromptTemplate.from_messages([
+    normal_chain = ChatPromptTemplate.from_messages([
         ("system", SYSTEM_PROMPT),
-        ("human", USER_PROMPT),
-    ])
+        ("human", USER_PROMPT)
+    ]) | llm | JsonOutputParser()
 
-    parser = JsonOutputParser()
-    chain = prompt | llm | parser
+    retry_chain = ChatPromptTemplate.from_messages([
+        ("system", RETRY_PROMPT),
+        ("human", USER_PROMPT)
+    ]) | llm | JsonOutputParser()
 
-    def analyze(parsed: dict, rag_results: list[dict]) -> dict:
+    def analyze(parsed, rag, retry_count=0, prev_confidence=0.0):
+        summary = parsed.get("summary", "")[:500]
 
-        rag_context = "\n".join(
-            f"- {r.get('root_cause','')}"
-            for r in rag_results
-        ) or "No context"
+        rag_text = "\n".join([
+            r.get("root_cause", "") for r in rag
+        ]) or "No context"
+
+        chain = retry_chain if retry_count > 0 else normal_chain
 
         try:
             result = chain.invoke({
-                "summary": parsed.get("summary", ""),
-                "error_type": parsed.get("error_type", ""),
-                "service_name": parsed.get("service_name", ""),
-                "severity": parsed.get("severity", ""),
-                "rag_context": rag_context,
+                "summary": summary,
+                "error_type": parsed.get("error_type"),
+                "service_name": parsed.get("service_name"),
+                "severity": parsed.get("severity"),
+                "rag_context": rag_text
             })
-
         except Exception as e:
-            logger.error("RootCause failed: %s", str(e))
-
-            # ✅ SAFE FALLBACK
+            logger.error("RootCause failed: %s", e)
             return {
-                "root_cause": "Unable to determine root cause due to processing failure.",
-                "confidence": 0.3,
-                "reasoning": "LLM pipeline failed"
+                "root_cause": "Unknown cause",
+                "evidence": "LLM failure",
+                "confidence": CONF_MIN,
+                "reasoning": "fallback"
             }
 
-        # ✅ SAFETY FIXES
-        result = result or {}
+        if not isinstance(result, dict):
+            result = {}
 
-        result.setdefault("root_cause", "Insufficient evidence.")
-        result.setdefault("confidence", 0.5)
-        result.setdefault("reasoning", "No clear signal found.")
+        result["root_cause"] = result.get("root_cause") or "Unknown cause"
+        result["evidence"] = result.get("evidence") or "No evidence"
+        result["reasoning"] = result.get("reasoning") or "No reasoning"
 
-        # clamp confidence
         try:
-            conf = float(result["confidence"])
+            conf = float(result.get("confidence", CONF_DEFAULT))
+            if conf > 1:
+                conf /= 100
         except:
-            conf = 0.5
+            conf = CONF_DEFAULT
 
-        result["confidence"] = round(max(0.0, min(1.0, conf)), 3)
-
-        logger.info("RootCauseAgent: confidence=%.3f", result["confidence"])
+        conf = max(CONF_MIN, min(CONF_MAX, conf))
+        result["confidence"] = round(conf, 3)
 
         return result
 
