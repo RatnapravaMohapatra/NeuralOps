@@ -6,82 +6,59 @@ from langchain_groq import ChatGroq
 logger = logging.getLogger(__name__)
 
 SEVERITY_LEVELS = {"Critical", "High", "Medium", "Low"}
+MIN_INPUT_LENGTH = 10
+MAX_INPUT_LENGTH = 2000
 
 SYSTEM_PROMPT = """You are an expert SRE log analysis agent.
-Given a raw log, extract structured information.
 
-Use ONLY what is explicitly in the log. Do not assume.
+Extract facts ONLY from the log. No assumptions.
 
-Service name rules:
-1. "Service: X" → X
-2. URL path → /predict → predict-service
-3. Known pattern → payment, auth, api
-4. Else → "unknown"
-
-Severity:
-Critical / High / Medium / Low
-
-Return ONLY JSON:
-- error_type
-- service_name
-- severity
-- summary
+Return JSON:
+{
+  "error_type": "...",
+  "service_name": "...",
+  "severity": "...",
+  "summary": "..."
+}
 """
 
-USER_PROMPT = """Analyze this log:
-
-{log_input}"""
+USER_PROMPT = "Log:\n{log_input}"
 
 
-def build_log_analyzer(groq_api_key: str) -> callable:
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        api_key=groq_api_key,
-        temperature=0,
-    )
-
-    prompt = ChatPromptTemplate.from_messages([
+def build_log_analyzer(api_key: str):
+    llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=api_key, temperature=0)
+    chain = ChatPromptTemplate.from_messages([
         ("system", SYSTEM_PROMPT),
-        ("human", USER_PROMPT),
-    ])
+        ("human", USER_PROMPT)
+    ]) | llm | JsonOutputParser()
 
-    parser = JsonOutputParser()
-    chain = prompt | llm | parser
+    def analyze(log_input: str):
+        if not log_input or len(log_input.strip()) < MIN_INPUT_LENGTH:
+            raise ValueError("Invalid log input")
 
-    def analyze(log_input: str) -> dict:
-        logger.info("LogAnalyzer: parsing log (len=%d)", len(log_input))
+        log_input = log_input[:MAX_INPUT_LENGTH]
 
         try:
             result = chain.invoke({"log_input": log_input})
-
         except Exception as e:
-            logger.error("LogAnalyzer failed: %s", str(e))
-
-            # ✅ FALLBACK (VERY IMPORTANT)
+            logger.error("LogAnalyzer failed: %s", e)
             return {
                 "error_type": "UnknownError",
                 "service_name": "unknown",
                 "severity": "Medium",
-                "summary": log_input[:200]
+                "summary": log_input[:300],
             }
 
-        # ✅ SAFE GUARDS
-        result = result or {}
+        if not isinstance(result, dict):
+            result = {}
 
-        result.setdefault("error_type", "UnknownError")
-        result.setdefault("service_name", "unknown")
-        result.setdefault("severity", "Medium")
-        result.setdefault("summary", log_input[:200])
+        result["error_type"] = result.get("error_type") or "UnknownError"
+        result["service_name"] = result.get("service_name") or "unknown"
+        result["severity"] = result.get("severity") or "Medium"
+        result["summary"] = result.get("summary") or log_input[:300]
 
         if result["severity"] not in SEVERITY_LEVELS:
             result["severity"] = "Medium"
-
-        logger.info(
-            "LogAnalyzer: error_type=%s service=%s severity=%s",
-            result["error_type"],
-            result["service_name"],
-            result["severity"],
-        )
 
         return result
 
