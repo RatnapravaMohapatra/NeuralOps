@@ -12,7 +12,7 @@ import re
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_groq import ChatGroq
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import Chroma  # ✅ CORRECT IMPORT
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint import MemorySaver
 
