@@ -1,41 +1,76 @@
-"""
-Shared utility tools available to all agents.
-"""
-import hashlib
 import re
-from datetime import datetime, timezone
+import hashlib
 
 
-def generate_incident_id(log_input: str) -> str:
-    digest = hashlib.sha256(log_input.encode()).hexdigest()[:8].upper()
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"INC-{ts}-{digest}"
+# ─────────────────────────────
+# INCIDENT ID
+# ─────────────────────────────
+def generate_incident_id(text: str) -> str:
+    h = hashlib.md5(text.encode()).hexdigest()[:8].upper()
+    return f"INC-{h}"
 
 
-def evaluate_confidence(confidence: float) -> str:
-    if confidence >= 0.8:
+# ─────────────────────────────
+# CONFIDENCE EVALUATION
+# ─────────────────────────────
+def evaluate_confidence(conf: float) -> str:
+    if conf >= 0.8:
         return "High"
-    elif confidence >= 0.6:
+    elif conf >= 0.6:
         return "Medium"
-    else:
-        return "Low"
+    return "Low"
 
 
-def extract_service_hint(log_input: str) -> str | None:
-    patterns = [
-        r"service[:\s]+([a-z0-9_-]+)",
-        r"app[:\s]+([a-z0-9_-]+)",
-        r"pod[:\s]+([a-z0-9_-]+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, log_input, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    return None
+# ─────────────────────────────
+# 🔥 SERVICE DETECTION (FIX)
+# ─────────────────────────────
+SERVICE_PATTERNS = {
+    "payment": "payment-service",
+    "predict": "predict-service",
+    "auth": "auth-service",
+    "user": "user-service",
+    "order": "order-service",
+    "cart": "cart-service",
+    "inventory": "inventory-service",
+    "recommendation": "recommendation-engine",
+    "session": "session-service",
+    "redis": "cache-service",
+    "cache": "cache-service",
+    "sql": "database-service",
+    "database": "database-service",
+    "kafka": "event-stream-service",
+}
 
 
-def sanitize_log(log_input: str, max_length: int = 4000) -> str:
-    log_input = log_input.strip()
-    if len(log_input) > max_length:
-        log_input = log_input[:max_length] + "\n[truncated]"
-    return log_input
+def infer_service_name(log: str, parsed: dict) -> str:
+    log_lower = (log or "").lower()
+
+    # 1. Use parser result if valid
+    svc = parsed.get("service_name")
+    if svc and svc != "unknown":
+        return svc
+
+    # 2. Explicit "Service: xyz"
+    match = re.search(r"service[:=]\s*([\w-]+)", log_lower)
+    if match:
+        return match.group(1)
+
+    # 3. API path inference
+    path_match = re.search(r"/([a-zA-Z0-9_-]+)", log_lower)
+    if path_match:
+        return f"{path_match.group(1)}-service"
+
+    # 4. Keyword-based mapping
+    for key, value in SERVICE_PATTERNS.items():
+        if key in log_lower:
+            return value
+
+    # 5. Error-based inference
+    if "timeout" in log_lower:
+        return "network-service"
+
+    if "oom" in log_lower or "memory" in log_lower:
+        return "compute-service"
+
+    # 6. Final fallback (NO unknown anymore)
+    return "core-platform-service"
