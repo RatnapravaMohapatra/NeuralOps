@@ -33,20 +33,32 @@ class IncidentState(TypedDict):
 
 
 # ─────────────────────────────
-# 🔥 LOAD API KEY (FIX)
+# 🔥 LOAD API KEY (SAFE)
 # ─────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY not set in environment")
+    logger.warning("GROQ_API_KEY not set. App running in limited mode.")
 
 
 # ─────────────────────────────
 # AGENTS (FIXED)
 # ─────────────────────────────
-log_analyzer = build_log_analyzer(GROQ_API_KEY)
-root_cause_agent = build_root_cause_agent(GROQ_API_KEY)
-fix_agent = build_fix_agent()  # usually doesn't need key
+log_analyzer = build_log_analyzer(GROQ_API_KEY) if GROQ_API_KEY else lambda x: {
+    "summary": "No API key",
+    "service_name": "unknown",
+    "severity": "Low"
+}
+
+root_cause_agent = build_root_cause_agent(GROQ_API_KEY) if GROQ_API_KEY else lambda x, y: {
+    "root_cause": "API key missing",
+    "confidence": 0.3
+}
+
+# 🔥 FIX HERE
+fix_agent = build_fix_agent(GROQ_API_KEY) if GROQ_API_KEY else lambda x: {
+    "fix_summary": "API key missing - no fix generated"
+}
 
 
 # ─────────────────────────────
@@ -55,7 +67,6 @@ fix_agent = build_fix_agent()  # usually doesn't need key
 def node_parse_logs(state: IncidentState):
     parsed = log_analyzer({"log_input": state["raw_input"]})
 
-    # 🔥 SERVICE FIX
     service = infer_service_name(state["raw_input"], parsed)
     parsed["service_name"] = service
 
