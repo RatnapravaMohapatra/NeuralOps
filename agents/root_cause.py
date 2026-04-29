@@ -4,6 +4,7 @@ from typing import Dict, List
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_groq import ChatGroq
+from langchain_core.callbacks import CallbackManager
 
 logger = logging.getLogger(__name__)
 
@@ -13,19 +14,20 @@ CONF_DEFAULT = 0.5
 
 
 # ─────────────────────────────
-# 🔥 KEYWORD ENGINE
+# 🔥 KEYWORD ENGINE (STRONG SIGNAL)
 # ─────────────────────────────
 KEYWORD_PATTERNS = {
     "timeout": ("downstream service latency or network timeout", 0.6),
     "timed out": ("service latency or blocking operation", 0.65),
     "connection refused": ("target service is down or unreachable", 0.85),
+
     "outofmemory": ("memory exhaustion due to high usage", 0.9),
+    "oomkilled": ("container killed due to memory limit exceeded", 0.95),
     "heap": ("JVM heap memory exhausted", 0.9),
 
     "insufficient cpu": ("Kubernetes nodes lack sufficient CPU resources", 0.9),
-    "crashloopbackoff": ("container repeatedly crashing on startup", 0.85),
-    "oomkilled": ("container killed due to memory limit exceeded", 0.95),
     "failedscheduling": ("pod cannot be scheduled due to resource constraints", 0.9),
+    "crashloopbackoff": ("container repeatedly crashing on startup", 0.85),
 
     "429": ("API rate limit exceeded", 0.9),
     "rate limit": ("API quota exceeded", 0.9),
@@ -44,10 +46,7 @@ def _keyword_override(parsed: Dict) -> Dict | None:
     for key, (cause, conf) in KEYWORD_PATTERNS.items():
         if key in text:
             return {
-                "root_cause": (
-                    f"The system failed due to {cause}. "
-                    f"Detected keyword '{key}' in logs."
-                ),
+                "root_cause": f"The system failed due to {cause}. Detected keyword '{key}' in logs.",
                 "evidence": key,
                 "confidence": conf,
                 "reasoning": f"Keyword match: {key}",
@@ -128,7 +127,7 @@ def _safe_result(result, severity: str, rag_hits: int):
 
     return {
         "root_cause": result.get("root_cause")
-        or "System instability detected due to resource or service constraints.",
+        or "Service degradation due to infrastructure or dependency issues.",
         "evidence": result.get("evidence") or "Log pattern analysis",
         "confidence": _boost_confidence(base_conf, severity, rag_hits),
         "reasoning": result.get("reasoning") or "Derived from log signals and context",
@@ -140,9 +139,9 @@ def _safe_result(result, severity: str, rag_hits: int):
 # ─────────────────────────────
 def build_root_cause_agent(api_key: str | None):
 
-    # 🔥 FALLBACK MODE
+    # 🔥 FALLBACK MODE (NO LLM)
     if not api_key:
-        logger.warning("No API key → keyword-only root cause")
+        logger.warning("No API key → keyword-based root cause")
 
         def fallback(parsed: Dict, rag_results: List):
             override = _keyword_override(parsed)
@@ -150,19 +149,20 @@ def build_root_cause_agent(api_key: str | None):
                 return override
 
             return {
-                "root_cause": "System instability due to insufficient log evidence",
+                "root_cause": "System degradation due to resource or service instability",
                 "evidence": "No strong signal",
-                "confidence": 0.35,
-                "reasoning": "Fallback mode (no LLM)",
+                "confidence": 0.4,
+                "reasoning": "Fallback without LLM",
             }
 
         return fallback
 
-    # 🔥 LLM MODE
+    # 🔥 LLM WITH LANGSMITH TRACING
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
         api_key=api_key,
         temperature=0,
+        callbacks=CallbackManager(),  # 🔥 REQUIRED
     )
 
     chain = ChatPromptTemplate.from_messages([
@@ -172,12 +172,12 @@ def build_root_cause_agent(api_key: str | None):
 
     def analyze(parsed: Dict, rag_results: List) -> Dict:
 
-        # 1. Keyword override (strongest signal)
+        # 1️⃣ Keyword override (highest priority)
         override = _keyword_override(parsed)
         if override:
             return override
 
-        # 2. Prepare RAG
+        # 2️⃣ Prepare RAG context
         rag_hits = len(rag_results)
         rag_context = "\n".join(
             f"- {r.get('root_cause', '')}"
@@ -186,7 +186,7 @@ def build_root_cause_agent(api_key: str | None):
 
         severity = parsed.get("severity", "Medium")
 
-        # 3. LLM inference
+        # 3️⃣ LLM inference
         try:
             result = chain.invoke({
                 "summary": parsed.get("summary", ""),
@@ -195,15 +195,17 @@ def build_root_cause_agent(api_key: str | None):
                 "severity": severity,
                 "rag_context": rag_context,
             })
+
         except Exception as e:
-            logger.error("LLM failed: %s", e)
+            logger.error("RootCause LLM failed: %s", e)
             return {
                 "root_cause": "Service degradation due to infrastructure or dependency issues",
                 "evidence": "LLM failure fallback",
-                "confidence": 0.4,
-                "reasoning": "Fallback due to model error",
+                "confidence": 0.45,
+                "reasoning": "Fallback due to model failure",
             }
 
+        # 4️⃣ Normalize + boost confidence
         return _safe_result(result, severity, rag_hits)
 
     return analyze
