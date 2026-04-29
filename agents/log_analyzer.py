@@ -9,6 +9,7 @@ SEVERITY_LEVELS = {"Critical", "High", "Medium", "Low"}
 MIN_INPUT_LENGTH = 5
 MAX_INPUT_LENGTH = 2000
 
+
 SYSTEM_PROMPT = """You are an expert SRE log analysis agent.
 
 Extract facts ONLY from the log. No assumptions.
@@ -25,27 +26,53 @@ Return JSON:
 USER_PROMPT = "Log:\n{log_input}"
 
 
+# ─────────────────────────────
+# 🔥 RULE-BASED SEVERITY BOOST
+# ─────────────────────────────
+def _infer_severity_from_log(text: str) -> str:
+    text = text.lower()
+
+    if any(k in text for k in ["outofmemory", "oom", "oomkilled"]):
+        return "Critical"
+
+    if any(k in text for k in ["insufficient cpu", "failedscheduling"]):
+        return "High"
+
+    if any(k in text for k in ["timeout", "timed out"]):
+        return "Medium"
+
+    if any(k in text for k in ["warning", "deprecated"]):
+        return "Low"
+
+    return "Medium"
+
+
+# ─────────────────────────────
+# MAIN BUILDER
+# ─────────────────────────────
 def build_log_analyzer(api_key: str | None):
-    # 🔥 Safe fallback if API key missing
+
+    # 🔥 Fallback mode (no API key)
     if not api_key:
         logger.warning("GROQ_API_KEY missing → using fallback analyzer")
 
         def fallback(input_data):
-            if isinstance(input_data, dict):
-                log_input = input_data.get("log_input", "")
-            else:
-                log_input = str(input_data)
+            log_input = (
+                input_data.get("log_input", "")
+                if isinstance(input_data, dict)
+                else str(input_data)
+            )
 
             return {
                 "error_type": "UnknownError",
                 "service_name": "unknown",
-                "severity": "Medium",
+                "severity": _infer_severity_from_log(log_input),
                 "summary": log_input[:300] or "No input",
             }
 
         return fallback
 
-    # 🔥 Real LLM analyzer
+    # 🔥 LLM mode
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
         api_key=api_key,
@@ -58,13 +85,14 @@ def build_log_analyzer(api_key: str | None):
     ]) | llm | JsonOutputParser()
 
     def analyze(input_data):
-        # 🔥 FIX: support both dict + string
-        if isinstance(input_data, dict):
-            log_input = input_data.get("log_input", "")
-        else:
-            log_input = str(input_data)
+        # 🔥 Handle both dict and string input
+        log_input = (
+            input_data.get("log_input", "")
+            if isinstance(input_data, dict)
+            else str(input_data)
+        )
 
-        # 🔥 Input validation (no crash)
+        # 🔥 Validation
         if not log_input or len(log_input.strip()) < MIN_INPUT_LENGTH:
             return {
                 "error_type": "InvalidInput",
@@ -77,27 +105,28 @@ def build_log_analyzer(api_key: str | None):
 
         try:
             result = chain.invoke({"log_input": log_input})
-            print("DEBUG LOG ANALYZER:", result)
 
         except Exception as e:
             logger.error("LogAnalyzer failed: %s", e)
             return {
                 "error_type": "UnknownError",
                 "service_name": "unknown",
-                "severity": "Medium",
+                "severity": _infer_severity_from_log(log_input),
                 "summary": log_input[:300],
             }
 
-        # 🔥 Ensure valid dict
         if not isinstance(result, dict):
             result = {}
+
+        # 🔥 Final normalization + severity correction
+        severity = result.get("severity")
+        if severity not in SEVERITY_LEVELS:
+            severity = _infer_severity_from_log(log_input)
 
         return {
             "error_type": result.get("error_type") or "UnknownError",
             "service_name": result.get("service_name") or "unknown",
-            "severity": result.get("severity")
-            if result.get("severity") in SEVERITY_LEVELS
-            else "Medium",
+            "severity": severity,
             "summary": result.get("summary") or log_input[:300],
         }
 
