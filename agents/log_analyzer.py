@@ -2,6 +2,7 @@ import logging
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_groq import ChatGroq
+from langchain_core.callbacks import CallbackManager
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +11,9 @@ MIN_INPUT_LENGTH = 5
 MAX_INPUT_LENGTH = 2000
 
 
+# ─────────────────────────────
+# PROMPTS
+# ─────────────────────────────
 SYSTEM_PROMPT = """You are an expert SRE log analysis agent.
 
 Extract facts ONLY from the log. No assumptions.
@@ -27,7 +31,7 @@ USER_PROMPT = "Log:\n{log_input}"
 
 
 # ─────────────────────────────
-# 🔥 RULE-BASED SEVERITY BOOST
+# 🔥 SEVERITY INFERENCE
 # ─────────────────────────────
 def _infer_severity_from_log(text: str) -> str:
     text = text.lower()
@@ -48,6 +52,46 @@ def _infer_severity_from_log(text: str) -> str:
 
 
 # ─────────────────────────────
+# 🔥 SERVICE INFERENCE (NO UNKNOWN)
+# ─────────────────────────────
+def _infer_service(text: str) -> str:
+    text = text.lower()
+
+    if any(k in text for k in ["kubernetes", "pod", "node", "scheduler"]):
+        return "k8s-platform"
+
+    if any(k in text for k in ["payment", "transaction"]):
+        return "payment-service"
+
+    if any(k in text for k in ["auth", "token", "jwt"]):
+        return "auth-service"
+
+    if "order" in text:
+        return "order-service"
+
+    if "user" in text:
+        return "user-service"
+
+    if any(k in text for k in ["database", "sql", "postgres", "mysql"]):
+        return "database-service"
+
+    if any(k in text for k in ["redis", "cache"]):
+        return "cache-service"
+
+    if any(k in text for k in ["kafka", "queue", "stream"]):
+        return "event-stream-service"
+
+    if any(k in text for k in ["timeout", "latency", "network"]):
+        return "network-service"
+
+    if any(k in text for k in ["memory", "oom"]):
+        return "compute-service"
+
+    # 🔥 FINAL fallback (NEVER unknown)
+    return "core-platform-service"
+
+
+# ─────────────────────────────
 # MAIN BUILDER
 # ─────────────────────────────
 def build_log_analyzer(api_key: str | None):
@@ -65,18 +109,19 @@ def build_log_analyzer(api_key: str | None):
 
             return {
                 "error_type": "UnknownError",
-                "service_name": "unknown",
+                "service_name": _infer_service(log_input),
                 "severity": _infer_severity_from_log(log_input),
                 "summary": log_input[:300] or "No input",
             }
 
         return fallback
 
-    # 🔥 LLM mode
+    # 🔥 LLM with LangSmith tracing
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
         api_key=api_key,
         temperature=0,
+        callbacks=CallbackManager(),  # 🔥 REQUIRED for LangSmith
     )
 
     chain = ChatPromptTemplate.from_messages([
@@ -85,7 +130,7 @@ def build_log_analyzer(api_key: str | None):
     ]) | llm | JsonOutputParser()
 
     def analyze(input_data):
-        # 🔥 Handle both dict and string input
+        # 🔥 Input handling
         log_input = (
             input_data.get("log_input", "")
             if isinstance(input_data, dict)
@@ -96,7 +141,7 @@ def build_log_analyzer(api_key: str | None):
         if not log_input or len(log_input.strip()) < MIN_INPUT_LENGTH:
             return {
                 "error_type": "InvalidInput",
-                "service_name": "unknown",
+                "service_name": "core-platform-service",
                 "severity": "Low",
                 "summary": "Log input too short or invalid",
             }
@@ -110,7 +155,7 @@ def build_log_analyzer(api_key: str | None):
             logger.error("LogAnalyzer failed: %s", e)
             return {
                 "error_type": "UnknownError",
-                "service_name": "unknown",
+                "service_name": _infer_service(log_input),
                 "severity": _infer_severity_from_log(log_input),
                 "summary": log_input[:300],
             }
@@ -118,14 +163,22 @@ def build_log_analyzer(api_key: str | None):
         if not isinstance(result, dict):
             result = {}
 
-        # 🔥 Final normalization + severity correction
+        # 🔥 Normalize severity
         severity = result.get("severity")
         if severity not in SEVERITY_LEVELS:
             severity = _infer_severity_from_log(log_input)
 
+        # 🔥 Normalize service (NO UNKNOWN EVER)
+        service = result.get("service_name")
+        if not service or service.lower() in ["unknown", ""]:
+            service = _infer_service(log_input)
+
+        # 🔥 Normalize error type
+        error_type = result.get("error_type") or "UnknownError"
+
         return {
-            "error_type": result.get("error_type") or "UnknownError",
-            "service_name": result.get("service_name") or "unknown",
+            "error_type": error_type,
+            "service_name": service,
             "severity": severity,
             "summary": result.get("summary") or log_input[:300],
         }
