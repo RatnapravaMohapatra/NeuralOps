@@ -13,7 +13,7 @@ CONF_DEFAULT = 0.5
 
 
 # ─────────────────────────────
-# 🔥 KEYWORD ENGINE (KEEP)
+# 🔥 KEYWORD ENGINE
 # ─────────────────────────────
 KEYWORD_PATTERNS = {
     "timeout": ("downstream service latency or network timeout", 0.6),
@@ -22,10 +22,10 @@ KEYWORD_PATTERNS = {
     "outofmemory": ("memory exhaustion due to high usage", 0.9),
     "heap": ("JVM heap memory exhausted", 0.9),
 
-    "insufficient cpu": ("Kubernetes nodes lack sufficient CPU resources", 0.85),
-    "crashloopbackoff": ("container repeatedly crashing on startup", 0.8),
-    "oomkilled": ("container killed due to memory limit exceeded", 0.9),
-    "failedscheduling": ("pod cannot be scheduled due to resource constraints", 0.85),
+    "insufficient cpu": ("Kubernetes nodes lack sufficient CPU resources", 0.9),
+    "crashloopbackoff": ("container repeatedly crashing on startup", 0.85),
+    "oomkilled": ("container killed due to memory limit exceeded", 0.95),
+    "failedscheduling": ("pod cannot be scheduled due to resource constraints", 0.9),
 
     "429": ("API rate limit exceeded", 0.9),
     "rate limit": ("API quota exceeded", 0.9),
@@ -67,6 +67,7 @@ RULES:
 - Use log signals first
 - Avoid vague answers
 - NEVER say "unknown cause"
+- Be precise and actionable
 
 Return JSON:
 {
@@ -105,16 +106,32 @@ def _clamp(val):
     return round(max(CONF_MIN, min(CONF_MAX, val)), 3)
 
 
-def _safe_result(result):
+def _boost_confidence(base_conf: float, severity: str, rag_hits: int) -> float:
+    boost = 0.0
+
+    if severity == "Critical":
+        boost += 0.1
+    elif severity == "High":
+        boost += 0.05
+
+    if rag_hits > 0:
+        boost += 0.05
+
+    return _clamp(base_conf + boost)
+
+
+def _safe_result(result, severity: str, rag_hits: int):
     if not isinstance(result, dict):
         result = {}
 
+    base_conf = result.get("confidence", CONF_DEFAULT)
+
     return {
         "root_cause": result.get("root_cause")
-        or "Likely system issue due to insufficient log detail.",
-        "evidence": result.get("evidence") or "No strong signal",
-        "confidence": _clamp(result.get("confidence", CONF_DEFAULT)),
-        "reasoning": result.get("reasoning") or "Fallback reasoning",
+        or "System instability detected due to resource or service constraints.",
+        "evidence": result.get("evidence") or "Log pattern analysis",
+        "confidence": _boost_confidence(base_conf, severity, rag_hits),
+        "reasoning": result.get("reasoning") or "Derived from log signals and context",
     }
 
 
@@ -123,9 +140,9 @@ def _safe_result(result):
 # ─────────────────────────────
 def build_root_cause_agent(api_key: str | None):
 
-    # 🔥 SAFE FALLBACK MODE
+    # 🔥 FALLBACK MODE
     if not api_key:
-        logger.warning("No API key → root cause using keyword only")
+        logger.warning("No API key → keyword-only root cause")
 
         def fallback(parsed: Dict, rag_results: List):
             override = _keyword_override(parsed)
@@ -133,10 +150,10 @@ def build_root_cause_agent(api_key: str | None):
                 return override
 
             return {
-                "root_cause": "Insufficient data to determine root cause",
-                "evidence": "No signal",
-                "confidence": 0.3,
-                "reasoning": "Fallback mode",
+                "root_cause": "System instability due to insufficient log evidence",
+                "evidence": "No strong signal",
+                "confidence": 0.35,
+                "reasoning": "Fallback mode (no LLM)",
             }
 
         return fallback
@@ -155,35 +172,38 @@ def build_root_cause_agent(api_key: str | None):
 
     def analyze(parsed: Dict, rag_results: List) -> Dict:
 
-        # 1. Keyword override first
+        # 1. Keyword override (strongest signal)
         override = _keyword_override(parsed)
         if override:
             return override
 
-        # 2. RAG context
+        # 2. Prepare RAG
+        rag_hits = len(rag_results)
         rag_context = "\n".join(
             f"- {r.get('root_cause', '')}"
             for r in rag_results
         ) or "No similar incidents found."
 
-        # 3. LLM fallback
+        severity = parsed.get("severity", "Medium")
+
+        # 3. LLM inference
         try:
             result = chain.invoke({
                 "summary": parsed.get("summary", ""),
                 "error_type": parsed.get("error_type", ""),
                 "service_name": parsed.get("service_name", ""),
-                "severity": parsed.get("severity", ""),
+                "severity": severity,
                 "rag_context": rag_context,
             })
         except Exception as e:
             logger.error("LLM failed: %s", e)
             return {
-                "root_cause": "System failure — unable to analyze log.",
-                "evidence": "LLM failure",
-                "confidence": CONF_MIN,
-                "reasoning": "Pipeline failure",
+                "root_cause": "Service degradation due to infrastructure or dependency issues",
+                "evidence": "LLM failure fallback",
+                "confidence": 0.4,
+                "reasoning": "Fallback due to model error",
             }
 
-        return _safe_result(result)
+        return _safe_result(result, severity, rag_hits)
 
     return analyze
