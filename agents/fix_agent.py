@@ -27,7 +27,22 @@ Severity: {severity}
 """
 
 
-def build_fix_agent(api_key: str):
+def build_fix_agent(api_key: str | None):
+    # 🔥 SAFE FALLBACK (no crash if key missing)
+    if not api_key:
+        logger.warning("GROQ_API_KEY missing → using fallback fix agent")
+
+        def fallback(data: dict):
+            return {
+                "immediate_fix": "Restart affected service or pod",
+                "short_term_fix": "Check logs and resource usage",
+                "long_term_fix": "Implement monitoring and autoscaling",
+                "fix_summary": "Fallback remediation (no AI)",
+            }
+
+        return fallback
+
+    # 🔥 LLM setup
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
         api_key=api_key,
@@ -39,16 +54,18 @@ def build_fix_agent(api_key: str):
         ("human", USER_PROMPT),
     ]) | llm | JsonOutputParser()
 
-    # 🔥 FIX: match your graph input format
     def generate_fix(data: dict):
+        # 🔥 Input safety
+        root_cause = (data.get("root_cause") or "")[:500]
+        service = data.get("service_name", "unknown")
+        severity = data.get("severity", "Medium")
+
         try:
             result = chain.invoke({
-                "root_cause": (data.get("root_cause") or "")[:500],
-                "service_name": data.get("service_name", "unknown"),
-                "severity": data.get("severity", "Medium"),
+                "root_cause": root_cause,
+                "service_name": service,
+                "severity": severity,
             })
-
-            print("DEBUG FIX RAW:", result)
 
         except Exception as e:
             logger.error("FixAgent failed: %s", e)
@@ -56,13 +73,13 @@ def build_fix_agent(api_key: str):
                 "immediate_fix": "Restart affected service or pod",
                 "short_term_fix": "Check logs and resource usage",
                 "long_term_fix": "Implement monitoring and autoscaling",
-                "fix_summary": "Fallback remediation applied",
+                "fix_summary": "Fallback remediation (LLM failure)",
             }
 
+        # 🔥 Ensure valid output
         if not isinstance(result, dict):
             result = {}
 
-        # 🔥 Safe output (no empty fields ever)
         return {
             "immediate_fix": result.get("immediate_fix") or "Restart affected service",
             "short_term_fix": result.get("short_term_fix") or "Investigate logs and dependencies",
