@@ -7,8 +7,21 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from graph.incident_graph import run_incident_pipeline
-from data.seed_db import init_db, get_all_incidents, get_stats, save_feedback
+# 🔥 SAFE IMPORTS (prevents crash at startup)
+try:
+    from graph.incident_graph import run_incident_pipeline
+    PIPELINE_AVAILABLE = True
+except Exception as e:
+    print("⚠️ Pipeline import failed:", e)
+    PIPELINE_AVAILABLE = False
+
+try:
+    from data.seed_db import init_db, get_all_incidents, get_stats, save_feedback
+    DB_AVAILABLE = True
+except Exception as e:
+    print("⚠️ DB import failed:", e)
+    DB_AVAILABLE = False
+
 
 # ─────────────────────────────
 # Logging
@@ -19,13 +32,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 # ─────────────────────────────
 # App Lifecycle
 # ─────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Initializing DB...")
-    init_db()
+    logger.info("Starting NeuralOps API...")
+
+    if DB_AVAILABLE:
+        try:
+            init_db()
+            logger.info("DB initialized")
+        except Exception as e:
+            logger.warning(f"DB init failed: {e}")
+
     yield
 
 
@@ -35,7 +56,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ⚠️ In production, replace "*" with your frontend domain
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -43,11 +63,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ─────────────────────────────
 # Schemas
 # ─────────────────────────────
 class AnalyzeRequest(BaseModel):
-    log_input: str = Field(..., min_length=10, max_length=5000)
+    log_input: str = Field(..., min_length=5, max_length=5000)
 
 
 class FeedbackRequest(BaseModel):
@@ -57,14 +78,14 @@ class FeedbackRequest(BaseModel):
 
 
 # ─────────────────────────────
-# Middleware (Request ID + Logging)
+# Middleware
 # ─────────────────────────────
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
     request_id = str(uuid.uuid4())
     start_time = time.time()
 
-    logger.info(f"[{request_id}] Incoming request: {request.url.path}")
+    logger.info(f"[{request_id}] {request.method} {request.url.path}")
 
     try:
         response = await call_next(request)
@@ -84,7 +105,11 @@ async def add_request_id(request: Request, call_next):
 # ─────────────────────────────
 @app.get("/")
 async def root():
-    return {"message": "NeuralOps API running"}
+    return {
+        "message": "NeuralOps API running 🚀",
+        "pipeline": "available" if PIPELINE_AVAILABLE else "fallback",
+        "db": "connected" if DB_AVAILABLE else "not_available"
+    }
 
 
 @app.get("/health")
@@ -96,8 +121,19 @@ async def health():
 async def analyze_incident(request: AnalyzeRequest):
     start = time.perf_counter()
 
+    if not PIPELINE_AVAILABLE:
+        return {
+            "incident_id": "INC-FALLBACK",
+            "root_cause": "Pipeline not available",
+            "confidence": 0.0,
+            "severity": "Unknown",
+            "service_name": "core-platform-service",
+            "fix_suggestion": "Check deployment configuration",
+            "evaluation": "Low",
+            "api_latency": 0,
+        }
+
     try:
-        # ⚠️ FIX: pipeline is sync → do NOT await
         result = run_incident_pipeline(request.log_input)
 
     except ValueError as e:
@@ -120,27 +156,36 @@ async def analyze_incident(request: AnalyzeRequest):
 
 @app.get("/api/incidents")
 async def list_incidents():
+    if not DB_AVAILABLE:
+        return {"incidents": []}
+
     try:
         return {"incidents": get_all_incidents()}
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to fetch incidents")
         raise HTTPException(status_code=500, detail="Failed to fetch incidents")
 
 
 @app.get("/api/stats")
 async def stats():
+    if not DB_AVAILABLE:
+        return {"total": 0}
+
     try:
         return get_stats()
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to fetch stats")
         raise HTTPException(status_code=500, detail="Failed to fetch stats")
 
 
 @app.post("/api/feedback")
 async def feedback(request: FeedbackRequest):
+    if not DB_AVAILABLE:
+        return {"status": "db not available"}
+
     try:
         save_feedback(request.incident_id, request.rating, request.comment)
         return {"status": "ok"}
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to save feedback")
         raise HTTPException(status_code=500, detail="Failed to save feedback")
