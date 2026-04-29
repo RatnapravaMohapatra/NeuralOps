@@ -33,10 +33,10 @@ USER_PROMPT = "Log:\n{log_input}"
 # ─────────────────────────────
 # 🔥 SEVERITY INFERENCE
 # ─────────────────────────────
-def _infer_severity_from_log(text: str) -> str:
+def _infer_severity(text: str) -> str:
     text = text.lower()
 
-    if any(k in text for k in ["outofmemory", "oom", "oomkilled"]):
+    if any(k in text for k in ["oomkilled", "outofmemory", "oom"]):
         return "Critical"
 
     if any(k in text for k in ["insufficient cpu", "failedscheduling"]):
@@ -87,8 +87,31 @@ def _infer_service(text: str) -> str:
     if any(k in text for k in ["memory", "oom"]):
         return "compute-service"
 
-    # 🔥 FINAL fallback (NEVER unknown)
-    return "core-platform-service"
+    return "core-platform-service"  # 🔥 never unknown
+
+
+# ─────────────────────────────
+# 🔥 ERROR TYPE INFERENCE (NEW)
+# ─────────────────────────────
+def _infer_error_type(text: str) -> str:
+    text = text.lower()
+
+    if "timeout" in text:
+        return "TimeoutError"
+
+    if "connection refused" in text:
+        return "ConnectionError"
+
+    if "oom" in text or "memory" in text:
+        return "MemoryError"
+
+    if "cpu" in text:
+        return "ResourceError"
+
+    if "database" in text or "sql" in text:
+        return "DatabaseError"
+
+    return "UnknownError"
 
 
 # ─────────────────────────────
@@ -108,9 +131,9 @@ def build_log_analyzer(api_key: str | None):
             )
 
             return {
-                "error_type": "UnknownError",
+                "error_type": _infer_error_type(log_input),
                 "service_name": _infer_service(log_input),
-                "severity": _infer_severity_from_log(log_input),
+                "severity": _infer_severity(log_input),
                 "summary": log_input[:300] or "No input",
             }
 
@@ -121,7 +144,7 @@ def build_log_analyzer(api_key: str | None):
         model="llama-3.3-70b-versatile",
         api_key=api_key,
         temperature=0,
-        callbacks=CallbackManager(),  # 🔥 REQUIRED for LangSmith
+        callbacks=CallbackManager(),  # 🔥 REQUIRED
     )
 
     chain = ChatPromptTemplate.from_messages([
@@ -130,7 +153,6 @@ def build_log_analyzer(api_key: str | None):
     ]) | llm | JsonOutputParser()
 
     def analyze(input_data):
-        # 🔥 Input handling
         log_input = (
             input_data.get("log_input", "")
             if isinstance(input_data, dict)
@@ -150,31 +172,28 @@ def build_log_analyzer(api_key: str | None):
 
         try:
             result = chain.invoke({"log_input": log_input})
-
         except Exception as e:
             logger.error("LogAnalyzer failed: %s", e)
             return {
-                "error_type": "UnknownError",
+                "error_type": _infer_error_type(log_input),
                 "service_name": _infer_service(log_input),
-                "severity": _infer_severity_from_log(log_input),
+                "severity": _infer_severity(log_input),
                 "summary": log_input[:300],
             }
 
         if not isinstance(result, dict):
             result = {}
 
-        # 🔥 Normalize severity
+        # 🔥 Normalize everything
         severity = result.get("severity")
         if severity not in SEVERITY_LEVELS:
-            severity = _infer_severity_from_log(log_input)
+            severity = _infer_severity(log_input)
 
-        # 🔥 Normalize service (NO UNKNOWN EVER)
         service = result.get("service_name")
         if not service or service.lower() in ["unknown", ""]:
             service = _infer_service(log_input)
 
-        # 🔥 Normalize error type
-        error_type = result.get("error_type") or "UnknownError"
+        error_type = result.get("error_type") or _infer_error_type(log_input)
 
         return {
             "error_type": error_type,
