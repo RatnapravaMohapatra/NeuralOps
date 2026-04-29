@@ -11,71 +11,62 @@ CONF_MIN = 0.15
 CONF_MAX = 0.95
 CONF_DEFAULT = 0.5
 
+
 # ─────────────────────────────
-# 🔥 KEYWORD PATTERN ENGINE (CRITICAL FIX)
+# 🔥 KEYWORD ENGINE (KEEP)
 # ─────────────────────────────
 KEYWORD_PATTERNS = {
-    # 🔥 Core system issues
     "timeout": ("downstream service latency or network timeout", 0.6),
     "timed out": ("service latency or blocking operation", 0.65),
     "connection refused": ("target service is down or unreachable", 0.85),
     "outofmemory": ("memory exhaustion due to high usage", 0.9),
     "heap": ("JVM heap memory exhausted", 0.9),
 
-    # 🔥 Kubernetes
     "insufficient cpu": ("Kubernetes nodes lack sufficient CPU resources", 0.85),
     "crashloopbackoff": ("container repeatedly crashing on startup", 0.8),
     "oomkilled": ("container killed due to memory limit exceeded", 0.9),
     "failedscheduling": ("pod cannot be scheduled due to resource constraints", 0.85),
 
-    # 🔥 API / infra
     "429": ("API rate limit exceeded", 0.9),
     "rate limit": ("API quota exceeded", 0.9),
 
-    # 🔥 App errors
     "nullpointerexception": ("null reference bug in application code", 0.8),
 }
 
 
 def _keyword_override(parsed: Dict) -> Dict | None:
     text = (
-        parsed.get("summary", "") + " " +
-        parsed.get("error_type", "")
-    ).lower()
-
-    print("DEBUG TEXT:", text)  # 🔥 debug (remove later)
+        (parsed.get("summary", "") + " " +
+         parsed.get("error_type", ""))
+        .lower()
+    )
 
     for key, (cause, conf) in KEYWORD_PATTERNS.items():
         if key in text:
-            print("🔥 KEYWORD MATCH:", key)
-
             return {
                 "root_cause": (
                     f"The system failed due to {cause}. "
-                    f"This is evidenced by '{key}' in the log. "
-                    f"This typically occurs when resources are constrained or services are unavailable."
+                    f"Detected keyword '{key}' in logs."
                 ),
                 "evidence": key,
                 "confidence": conf,
-                "reasoning": f"Keyword '{key}' matched known failure pattern"
+                "reasoning": f"Keyword match: {key}",
             }
-
     return None
 
 
 # ─────────────────────────────
-# LLM PROMPT (fallback only)
+# PROMPT
 # ─────────────────────────────
 SYSTEM_PROMPT = """
 You are a senior Site Reliability Engineer.
 
-TASK:
 Identify the most likely root cause.
 
 RULES:
 - Use log signals first
-- If weak signal → infer from patterns (timeout, memory, network)
-- NEVER return "Unknown cause"
+- Avoid vague answers
+- NEVER say "unknown cause"
 
 Return JSON:
 {
@@ -130,8 +121,27 @@ def _safe_result(result):
 # ─────────────────────────────
 # MAIN AGENT
 # ─────────────────────────────
-def build_root_cause_agent(api_key: str):
+def build_root_cause_agent(api_key: str | None):
 
+    # 🔥 SAFE FALLBACK MODE
+    if not api_key:
+        logger.warning("No API key → root cause using keyword only")
+
+        def fallback(parsed: Dict, rag_results: List):
+            override = _keyword_override(parsed)
+            if override:
+                return override
+
+            return {
+                "root_cause": "Insufficient data to determine root cause",
+                "evidence": "No signal",
+                "confidence": 0.3,
+                "reasoning": "Fallback mode",
+            }
+
+        return fallback
+
+    # 🔥 LLM MODE
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
         api_key=api_key,
@@ -143,34 +153,20 @@ def build_root_cause_agent(api_key: str):
         ("human", USER_PROMPT),
     ]) | llm | JsonOutputParser()
 
-    def analyze(
-        parsed: Dict,
-        rag_results: List,
-        retry_count: int = 0,
-        prev_confidence: float = 0.0,
-    ) -> Dict:
+    def analyze(parsed: Dict, rag_results: List) -> Dict:
 
-        print("DEBUG PARSED:", parsed)  # 🔥 debug
-
-        # ─────────────────────────────
-        # 🔥 STEP 1: KEYWORD OVERRIDE
-        # ─────────────────────────────
+        # 1. Keyword override first
         override = _keyword_override(parsed)
         if override:
-            logger.info("Keyword override used")
             return override
 
-        # ─────────────────────────────
-        # STEP 2: RAG CONTEXT
-        # ─────────────────────────────
+        # 2. RAG context
         rag_context = "\n".join(
             f"- {r.get('root_cause', '')}"
             for r in rag_results
         ) or "No similar incidents found."
 
-        # ─────────────────────────────
-        # STEP 3: LLM FALLBACK
-        # ─────────────────────────────
+        # 3. LLM fallback
         try:
             result = chain.invoke({
                 "summary": parsed.get("summary", ""),
@@ -179,7 +175,6 @@ def build_root_cause_agent(api_key: str):
                 "severity": parsed.get("severity", ""),
                 "rag_context": rag_context,
             })
-
         except Exception as e:
             logger.error("LLM failed: %s", e)
             return {
