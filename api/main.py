@@ -1,8 +1,19 @@
+# ─────────────────────────────
+# 🔥 LangSmith INIT (MUST BE FIRST)
+# ─────────────────────────────
 import os
 from utils.tracing import setup_langsmith
 
 setup_langsmith()
 
+# Optional debug (remove later if you want)
+print("✅ LangSmith tracing enabled:", os.getenv("LANGCHAIN_TRACING_V2"))
+print("📦 LangSmith project:", os.getenv("LANGCHAIN_PROJECT"))
+
+
+# ─────────────────────────────
+# STANDARD IMPORTS
+# ─────────────────────────────
 import time
 import uuid
 import logging
@@ -13,7 +24,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 
-# 🔥 SAFE IMPORTS (prevents crash at startup)
+# ─────────────────────────────
+# SAFE IMPORTS (prevent crash)
+# ─────────────────────────────
 try:
     from graph.incident_graph import run_incident_pipeline
     PIPELINE_AVAILABLE = True
@@ -30,7 +43,7 @@ except Exception as e:
 
 
 # ─────────────────────────────
-# Logging
+# LOGGING
 # ─────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -40,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────
-# App Lifecycle
+# APP LIFECYCLE
 # ─────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -55,7 +68,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    logger.info("Shutting down NeuralOps API...")
 
+
+# ─────────────────────────────
+# APP INIT
+# ─────────────────────────────
 app = FastAPI(
     title="NeuralOps API",
     version="1.0.0",
@@ -64,14 +82,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # restrict in production
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 # ─────────────────────────────
-# Schemas
+# SCHEMAS
 # ─────────────────────────────
 class AnalyzeRequest(BaseModel):
     log_input: str = Field(..., min_length=5, max_length=5000)
@@ -84,7 +102,7 @@ class FeedbackRequest(BaseModel):
 
 
 # ─────────────────────────────
-# Middleware
+# MIDDLEWARE (REQUEST TRACKING)
 # ─────────────────────────────
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
@@ -107,14 +125,15 @@ async def add_request_id(request: Request, call_next):
 
 
 # ─────────────────────────────
-# Routes
+# ROUTES
 # ─────────────────────────────
 @app.get("/")
 async def root():
     return {
         "message": "NeuralOps API running 🚀",
         "pipeline": "available" if PIPELINE_AVAILABLE else "fallback",
-        "db": "connected" if DB_AVAILABLE else "not_available"
+        "db": "connected" if DB_AVAILABLE else "not_available",
+        "tracing": os.getenv("LANGCHAIN_TRACING_V2"),
     }
 
 
@@ -123,6 +142,9 @@ async def health():
     return {"status": "healthy"}
 
 
+# ─────────────────────────────
+# ANALYZE ENDPOINT
+# ─────────────────────────────
 @app.post("/api/analyze")
 async def analyze_incident(request: AnalyzeRequest):
     start = time.perf_counter()
@@ -140,6 +162,7 @@ async def analyze_incident(request: AnalyzeRequest):
         }
 
     try:
+        # 🔥 NOTE: tracing happens inside incident_graph.py (recommended)
         result = run_incident_pipeline(request.log_input)
 
     except ValueError as e:
@@ -160,6 +183,9 @@ async def analyze_incident(request: AnalyzeRequest):
     }
 
 
+# ─────────────────────────────
+# INCIDENTS
+# ─────────────────────────────
 @app.get("/api/incidents")
 async def list_incidents():
     if not DB_AVAILABLE:
@@ -184,6 +210,9 @@ async def stats():
         raise HTTPException(status_code=500, detail="Failed to fetch stats")
 
 
+# ─────────────────────────────
+# FEEDBACK
+# ─────────────────────────────
 @app.post("/api/feedback")
 async def feedback(request: FeedbackRequest):
     if not DB_AVAILABLE:
