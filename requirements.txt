@@ -1,5 +1,5 @@
 fastapi
-uvicorn[standard]
+uvicorn
 pydantic
 
 langchain
@@ -11,7 +11,11 @@ langgraph
 langsmith
 rank-bm25
 
+chromadb
+sentence-transformers
+
 streamlit
 httpx
 python-dotenv
 pandas
+tiktoken
