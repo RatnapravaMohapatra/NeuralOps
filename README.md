@@ -1,4 +1,4 @@
-cat > /home/claude/README.md << 'READMEEOF'
+
 <div align="center">
 
 <img src="https://img.shields.io/badge/NeuralOps-AI%20Incident%20Analysis-FF6B35?style=for-the-badge&logo=lightning&logoColor=white" alt="NeuralOps"/>
@@ -30,7 +30,7 @@ cat > /home/claude/README.md << 'READMEEOF'
 
 <br/>
 
-**[Live API](https://neuralops-api.onrender.com/health) · [API Docs](https://neuralops-api.onrender.com/docs) · [Live UI](https://neuralops-ui.onrender.com) · [Report Bug](../../issues) · [Request Feature](../../issues)**
+**[Live API](https://neuralops-api.onrender.com/health) · [API Docs](https://neuralops-api.onrender.com/docs) · [Live UI](https://neuralops-ratna.streamlit.app/) · [Report Bug](../../issues) · [Request Feature](../../issues)**
 
 </div>
 
@@ -448,8 +448,8 @@ Both services are deployed on Render's free tier.
 
 | Service | URL |
 |---|---|
-| **FastAPI API** | https://neuralops-api.onrender.com |
-| **Streamlit UI** | https://neuralops-ui.onrender.com |
+| **FastAPI API** | https://neuralops-1.onrender.com |
+| **Streamlit UI** | https://neuralops-ratna.streamlit.app/ |
 | **API Health** | https://neuralops-api.onrender.com/health |
 | **API Docs** | https://neuralops-api.onrender.com/docs |
 
@@ -694,8 +694,8 @@ This project is actively being developed. Planned improvements include:
 
 *AI Engineer | Building production-grade AI systems*
 
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-0077B5?style=flat-square&logo=linkedin&logoColor=white)](https://linkedin.com/in/ratnaprava-mohapatra)
-[![GitHub](https://img.shields.io/badge/GitHub-Follow-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/ratnaprava)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-0077B5?style=flat-square&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/ratnapravamohapatra/)
+[![GitHub](https://img.shields.io/badge/GitHub-Follow-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/RatnapravaMohapatra)
 
 </div>
 
@@ -716,9 +716,3 @@ Distributed under the MIT License. See `LICENSE` for more information.
 *Built and maintained by Ratnaprava Mohapatra*
 
 </div>
-READMEEOF
-echo "Done: $(wc -l < /home/claude/README.md) lines"
-Output
-
-Done: 717 lines
-Done
