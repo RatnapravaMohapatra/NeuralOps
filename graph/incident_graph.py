@@ -1,5 +1,6 @@
 import time
 import logging
+import os
 from typing import TypedDict
 
 from langgraph.graph import StateGraph, END
@@ -32,11 +33,20 @@ class IncidentState(TypedDict):
 
 
 # ─────────────────────────────
-# AGENTS
+# 🔥 LOAD API KEY (FIX)
 # ─────────────────────────────
-log_analyzer = build_log_analyzer()
-root_cause_agent = build_root_cause_agent("")
-fix_agent = build_fix_agent()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY not set in environment")
+
+
+# ─────────────────────────────
+# AGENTS (FIXED)
+# ─────────────────────────────
+log_analyzer = build_log_analyzer(GROQ_API_KEY)
+root_cause_agent = build_root_cause_agent(GROQ_API_KEY)
+fix_agent = build_fix_agent()  # usually doesn't need key
 
 
 # ─────────────────────────────
@@ -64,7 +74,7 @@ def node_analyze(state: IncidentState):
     result = root_cause_agent(
         {
             **state["parsed_data"],
-            "raw_input": state["raw_input"],  # 🔥 IMPORTANT
+            "raw_input": state["raw_input"],
         },
         state["rag_results"],
     )
