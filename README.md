@@ -21,7 +21,7 @@
 
 <br/>
 
-**[Live Demo](#) · [API Docs](http://localhost:8000/docs) · [Report Bug](issues) · [Request Feature](issues)**
+**[Live Demo](https://neuralops-ratna.streamlit.app/) · [API Docs](http://localhost:8000/docs) · [Report Bug](issues) · [Request Feature](issues)**
 
 </div>
 
@@ -42,7 +42,7 @@
 - [Tech Stack](#tech-stack)
 - [Features](#features)
 - [Issues Fixed](#issues-fixed--engineering-challenges-solved)
-- [What We Built](#what-we-developed)
+- [What Built](#what-I-developed)
 - [Getting Started](#getting-started)
 - [API Reference](#api-reference)
 - [Project Structure](#project-structure)
